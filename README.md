@@ -1,9 +1,10 @@
-# paxos_sim
+# paxos-sim
 
-Single-decree Paxos with proposers, acceptors, learners, competing proposals
+Single-file Python CLI. Zero dependencies.
+
+## Usage
 
 ```bash
+python3 paxos_sim.py
 python3 paxos_sim.py test
 ```
-
-Zero deps. Python 3.8+.
