@@ -1,65 +1,130 @@
 #!/usr/bin/env python3
-"""Basic Paxos consensus simulation."""
+"""paxos_sim - Single-decree Paxos consensus simulation."""
 import sys
 
-class Proposal:
-    def __init__(self, number, value): self.number, self.value = number, value
+class Proposer:
+    def __init__(self, node_id):
+        self.id = node_id
+        self.proposal_num = 0
+        self.value = None
+    
+    def prepare(self):
+        self.proposal_num += 1
+        return {"type": "prepare", "n": (self.proposal_num, self.id)}
+    
+    def propose(self, promises, value):
+        # Find highest-numbered accepted value from promises
+        accepted = [(p["accepted_n"], p["accepted_v"]) for p in promises
+                    if p["promise"] and p.get("accepted_v") is not None]
+        if accepted:
+            _, self.value = max(accepted)
+        else:
+            self.value = value
+        return {"type": "accept", "n": (self.proposal_num, self.id), "v": self.value}
 
 class Acceptor:
-    def __init__(self, aid):
-        self.id, self.promised, self.accepted = aid, -1, None
-    def prepare(self, proposal_num):
-        if proposal_num > self.promised:
-            self.promised = proposal_num
-            return (True, self.accepted)
-        return (False, None)
-    def accept(self, proposal):
-        if proposal.number >= self.promised:
-            self.promised = proposal.number; self.accepted = proposal
-            return True
-        return False
+    def __init__(self, node_id):
+        self.id = node_id
+        self.promised_n = (0, -1)
+        self.accepted_n = (0, -1)
+        self.accepted_v = None
+    
+    def handle_prepare(self, msg):
+        if msg["n"] > self.promised_n:
+            self.promised_n = msg["n"]
+            return {"promise": True, "acceptor": self.id,
+                    "accepted_n": self.accepted_n, "accepted_v": self.accepted_v}
+        return {"promise": False, "acceptor": self.id}
+    
+    def handle_accept(self, msg):
+        if msg["n"] >= self.promised_n:
+            self.promised_n = msg["n"]
+            self.accepted_n = msg["n"]
+            self.accepted_v = msg["v"]
+            return {"accepted": True, "acceptor": self.id, "n": msg["n"], "v": msg["v"]}
+        return {"accepted": False, "acceptor": self.id}
 
-class Proposer:
-    def __init__(self, pid, acceptors):
-        self.id, self.acceptors, self.next_num = pid, acceptors, pid
-    def propose(self, value):
-        n = self.next_num; self.next_num += len(self.acceptors) + 1
-        # Phase 1: Prepare
-        promises = []
-        for a in self.acceptors:
-            ok, prev = a.prepare(n)
-            if ok: promises.append((a, prev))
-        if len(promises) <= len(self.acceptors) // 2: return None
-        # Use highest accepted value if any
-        prev_accepted = [p for _, p in promises if p is not None]
-        if prev_accepted:
-            value = max(prev_accepted, key=lambda p: p.number).value
-        # Phase 2: Accept
-        proposal = Proposal(n, value); accepts = 0
-        for a, _ in promises:
-            if a.accept(proposal): accepts += 1
-        if accepts > len(self.acceptors) // 2: return proposal
+class Learner:
+    def __init__(self):
+        self.accepted = {}  # proposal_n -> {acceptor_id: value}
+        self.chosen = None
+    
+    def handle_accepted(self, msg, quorum_size):
+        n = msg["n"]
+        if n not in self.accepted:
+            self.accepted[n] = {}
+        self.accepted[n][msg["acceptor"]] = msg["v"]
+        if len(self.accepted[n]) >= quorum_size:
+            self.chosen = msg["v"]
+        return self.chosen
+
+def run_paxos(proposers, acceptors, learner, value):
+    quorum = len(acceptors) // 2 + 1
+    
+    # Phase 1: Prepare
+    prep = proposers[0].prepare()
+    promises = [a.handle_prepare(prep) for a in acceptors]
+    granted = [p for p in promises if p["promise"]]
+    
+    if len(granted) < quorum:
         return None
+    
+    # Phase 2: Accept
+    accept = proposers[0].propose(granted, value)
+    responses = [a.handle_accept(accept) for a in acceptors]
+    
+    for r in responses:
+        if r["accepted"]:
+            result = learner.handle_accepted(r, quorum)
+            if result is not None:
+                return result
+    return None
 
-def main():
-    if len(sys.argv) < 2: print("Usage: paxos_sim.py <demo|test>"); return
-    if sys.argv[1] == "test":
-        acceptors = [Acceptor(i) for i in range(5)]
-        p1 = Proposer(0, acceptors)
-        result = p1.propose("value_A")
-        assert result is not None; assert result.value == "value_A"
-        # All acceptors should have accepted
-        assert all(a.accepted is not None for a in acceptors)
-        # Second proposer with higher number should still work
-        p2 = Proposer(1, acceptors)
-        result2 = p2.propose("value_B")
-        assert result2 is not None
-        # Should pick up previously accepted value
-        assert result2.value == "value_A"  # Paxos preserves first accepted
-        print("All tests passed!")
+def test():
+    # Basic consensus
+    proposers = [Proposer(0)]
+    acceptors = [Acceptor(i) for i in range(3)]
+    learner = Learner()
+    
+    result = run_paxos(proposers, acceptors, learner, "hello")
+    assert result == "hello"
+    assert learner.chosen == "hello"
+    
+    # Competing proposers
+    p1 = Proposer(0)
+    p2 = Proposer(1)
+    acceptors2 = [Acceptor(i) for i in range(5)]
+    learner2 = Learner()
+    
+    # P1 prepares first
+    prep1 = p1.prepare()
+    promises1 = [a.handle_prepare(prep1) for a in acceptors2]
+    
+    # P2 prepares with higher number
+    prep2 = p2.prepare()
+    promises2 = [a.handle_prepare(prep2) for a in acceptors2]
+    
+    # P1's accept should be rejected (promises broken)
+    accept1 = p1.propose([p for p in promises1 if p["promise"]], "A")
+    responses1 = [a.handle_accept(accept1) for a in acceptors2]
+    accepted1 = sum(1 for r in responses1 if r["accepted"])
+    
+    # P2's accept should succeed
+    accept2 = p2.propose([p for p in promises2 if p["promise"]], "B")
+    responses2 = [a.handle_accept(accept2) for a in acceptors2]
+    accepted2 = sum(1 for r in responses2 if r["accepted"])
+    
+    assert accepted2 >= 3  # Majority
+    
+    for r in responses2:
+        if r["accepted"]:
+            learner2.handle_accepted(r, 3)
+    assert learner2.chosen == "B"
+    
+    print("All tests passed!")
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "test":
+        test()
     else:
-        acceptors = [Acceptor(i) for i in range(3)]
-        p = Proposer(0, acceptors)
-        r = p.propose("hello"); print(f"Consensus: {r.value if r else 'FAILED'}")
-
-if __name__ == "__main__": main()
+        print("Usage: paxos_sim.py test")

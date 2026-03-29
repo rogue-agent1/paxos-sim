@@ -1,10 +1,9 @@
-# Paxos Sim
+# paxos_sim
 
-A zero-dependency Python CLI tool.
-
-## Usage
+Single-decree Paxos with proposers, acceptors, learners, competing proposals
 
 ```bash
-python paxos_sim.py test
-python paxos_sim.py demo
+python3 paxos_sim.py test
 ```
+
+Zero deps. Python 3.8+.
